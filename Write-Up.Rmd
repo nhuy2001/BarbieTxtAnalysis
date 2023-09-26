@@ -1,0 +1,364 @@
+---
+output: html_document
+---
+
+<h1 style="text-align: center;"> <b> Analysis of Barbie (2023) IMDB's Reviews </b> </h1>
+
+<br/>
+<br/>
+<br/>
+
+<h3 style="text-align: center;"> Huy Nguyen </h3>
+<h3 style="text-align: center;"> Graduate SBGE, Seattle Pacific University </h3>
+<h3 style="text-align: center;"> ISM 6258: Decsision-Making with Business Intelligence and Analytics </h3>
+
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+
+<h2 style="text-align: center;"> <b> Business Statement </b> </h2>
+The primary objective of this analysis is to assess the reception and public perception of the movie *Barbie 2023* among 599 IMDb non-spoiler reviews from 21 July 2023 to 29 July 2023. By scrutinizing the reviews and ratings provided by the IMDb community, I seek to gauge audience sentiment, identify key strengths, weaknesses, and areas of improvement within the movie, and evaluate its overall impact on viewers.
+
+<h2 style="text-align: center;"> <b> Data Sources </b> </h2>
+The extract of 797 IMDb's Barbie reviews from July 21 to July 29, was obtained from Kaggle.com
+
+#### **Reference**
+Ibrahim (2023, August 3) IMDB Reviews on Barbie. *Kaggle*. https://www.kaggle.com/datasets/ibrahimonmars/imdb-reviews-on-barbie
+
+<h2 style="text-align: center;"> <b> Analytics </b> </h2>
+
+### **Data Cleaning**
+Here are all of the library used for this project
+```{r}
+library(tidyverse)
+library(stringr)
+library(scales)
+library(tidytext)
+library(textstem)
+library(tidyr)
+library(ggwordcloud)
+library(treemapify)
+library(vader)
+library(reshape2)
+library(igraph)
+library(ggraph)
+library(forcats)
+library(topicmodels)
+```
+
+Let's load up the data. 
+```{r}
+dat <- fst::read_fst("Barbie.fst")
+glimpse(dat)
+```
+I assigned a unique ID for each review for the convient of spliting and joining data back together. Regular expressions (regex) were utilized to (1) extract date and (2) remove introduction and username
+
+```{r}
+dat$ID <- 1:length(dat$text) #Assigning ID
+
+dat$date <- mark::str_extract_date(dat$text, format = "%d %B %Y") #extract date
+dat$thesisUsername <- stringr::str_extract(dat$text, "^\\D+") #split username and excerpt from the full review
+
+dat$rating <- as.numeric(dat$rating) #convert rating to numeric since a couple of them has lettering rating for some reason. These will become NA
+glimpse(dat)
+```
+
+I exported the data, manually go through all reviews to delete the username from the excerpt not knowing that I would not even analyze them. Additionally, str_extract_date missed some of the date so I utilized this chance to fix them. This data is then saved to *BarbieScrub*
+
+During this process, I discovered that the scraper did not account for spoiler reviews which is hidden behind the label of "Warning: Spoilers". There were other noise texts as well such as "Click here to sign up" and so on. I am inexperienced with regex and so wasn't able to remove all of these noises. Fortunately, the left over noise did not affect the analysis.
+```{r}
+dat <- fst::read_fst("BarbieScrub.fst") #Load data
+
+noSpoiler <- dat %>% filter(!grepl("Warning: Spoilers", text)) #Remove spoiler reviews
+noSpoiler$review <- sub('.*July 2023', '', noSpoiler$text) #Failed attempt at removing "x out of x find this helpful"
+noSpoiler <- noSpoiler %>% subset(select = -c(text, thesis, rating, date)) #remove some columns
+
+glimpse(noSpoiler)
+```
+
+I loaded up the stop-word and afinn sentiment libraries in preparation for text analysis
+```{r}
+data("stop_words")
+afinn <- get_sentiments("afinn")
+
+paste("Stop-words Library")
+glimpse(stop_words)
+paste("AFINN Library")
+glimpse(afinn)
+```
+
+### **Analysis**
+I will run parallel analyses for word and bi-grams.
+#### *Word Frequency*
+##### Word Count
+Basic data preparation for word frequency:
+tokenization -> removing stop-words -> convert all strings to lower cases -> lemmatization
+```{r}
+tidyDat <- noSpoiler %>% unnest_tokens(word, review) #tokenization
+
+tidyDat <- tidyDat %>% anti_join(stop_words) #removing stop-words
+tidyDat$word <- tidyDat$word %>% str_to_lower(locale = "en") #convert all strings to lower cases
+tidyDat$word <- lemmatize_words(tidyDat$word) #lemmatization
+
+wordCount <- tidyDat %>% count(word, sort = T) #Get word count
+glimpse(wordCount)
+```
+Here's the word frequency charts. While I like the visual of the wordcloud chart better, treemap is ten times easier to read and interpret. From the word frequency, the most popular words appear to be cast member names (i.e., Margot Robbie, Ryan Gosling, Greta Gerwig, etc.), other words allude to a positive viewing experience of the movie.
+```{r}
+wordCount %>% 
+        head(100) %>%
+        ggplot(., aes(label = word, size = n, color = n))+
+        geom_text_wordcloud(shape = "diamond")+
+        scale_size_area(max_size = 20)+
+        theme_void()+
+        theme(text = element_text(size = 14, face = "bold"),
+              plot.title = element_text(hjust = .5))+
+  labs(title = "Top 100 Most Common Words \nUsed in Barbie (2023)'s IMDB Reviews")
+
+wordCount %>% head(100) %>%
+  ggplot(., aes(area = n, fill = n, 
+                label = paste(word, "\ncount:", n)))+
+  geom_treemap()+
+  geom_treemap_text(place = "centre")+
+  theme(text = element_text(size = 14, face = "bold"),
+              plot.title = element_text(hjust = .5),
+        legend.position = "none")+
+  labs(title = "Top 100 Most Common Words \nUsed in Barbie (2023)'s IMDB Reviews")
+```
+
+##### Bi-gram Count
+Preparation is similar to word count
+```{r}
+#Tokenization
+bi_gram <- noSpoiler %>% 
+  unnest_tokens(bigram, review, token = "ngrams", n = 2) %>%
+  filter(!is.na(bigram))
+  
+#All to lowercase
+bi_gram$bigram <- str_to_lower(bi_gram$bigram, locale = "en")
+
+#Remove stop-word
+bigrams_separated <- bi_gram %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+
+bigrams_filtered <- bigrams_separated %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word)
+
+bigrams_filtered$word1 <- lemmatize_words(bigrams_filtered$word1)
+bigrams_filtered$word2 <- lemmatize_words(bigrams_filtered$word2)
+
+#Word Count
+bigram_counts <- bigrams_filtered %>% 
+  count(word1, word2, sort = TRUE)
+
+bigram_counts$word12 <- str_c(bigram_counts$word1, " ", bigram_counts$word2) #Join data back
+```
+
+Bi-gram frequency shows a heavier emphasis on cast member names and movie summary which is not quite helpful. One bi-gram of note is "social commentary" which is indeed one of the objectives of the movie.
+```{r}
+bigram_counts %>% 
+  head(100) %>%
+  ggplot(., aes(label = word12, size = n, color = n))+
+  geom_text_wordcloud(shape = "diamond")+
+  theme_minimal()+
+  scale_color_gradient(low = "darkgreen", high = "lightgreen")+
+  scale_size_area(max_size = 12)+
+  theme(text = element_text(size = 14, face = "bold"),
+              plot.title = element_text(hjust = .5))+
+  labs(title = "Top 100 Most Common Bi-Grams \nUsed in Barbie (2023)'s IMDB Reviews")
+
+bigram_counts %>% head(100) %>%
+  ggplot(., aes(area = n, fill = n, 
+                label = paste(word12, "\ncount:", n)))+
+  geom_treemap()+
+  scale_fill_gradient(low = "darkgreen", high = "lightgreen")+
+  geom_treemap_text(place = "centre")+
+  theme(text = element_text(size = 14, face = "bold"),
+              plot.title = element_text(hjust = .5),
+        legend.position = "none")+
+  labs(title = "Top 100 Most Common Bi-Grams \nUsed in Barbie (2023)'s IMDB Reviews")
+```
+
+#### *Sentiment Analysis*
+##### Word Sentiment
+
+Preparation is pretty simple, I join the dataset with the afinn library, which sentiment is code on a numeric scale, and then assign sentiment labels (i.e., positive, negative) based on whether a number is negative or not. Then it is just a matter of getting the word count.
+```{r}
+wordSent <- inner_join(tidyDat, afinn)
+wordSent <- wordSent %>% group_by(word, value) %>% summarise (n = n()) %>% arrange(desc(n))
+
+wordSent$sentiment <- ifelse(wordSent$value < 0, "negative", "positive")
+```
+Results show overwhelming positivity from the audience which is a great sign with one of the more common word being "perfect".
+Unfortunately, I had to compromise the design of the word cloud as I wanted a 50/50 split initially. However, that option is specific to the *wordcloud* package, which scaling is never right, so I settled with this design from *ggwordcloud*.
+```{r}
+ wordSent %>% group_by(sentiment) %>% slice_max(n, n = 100) %>% ungroup() %>% 
+        ggplot(aes(label = word, size = n, color = sentiment))+
+        geom_text_wordcloud(shape = "diamond")+
+        scale_color_manual(values = c("#FF470A", "#009FB7"))+
+        scale_size_area(max_size = 12)+
+        theme_void()+
+        theme(plot.title = element_text(hjust = .5, face = "bold"))+
+  labs(title = "Top 100 Most Common Sentiment Words \nUsed in Barbie (2023)'s IMDB Reviews")
+
+wordSent %>% group_by(sentiment) %>% slice_max(n, n = 20) %>% ungroup() %>% mutate(word = reorder(word,n)) %>%
+  ggplot(., aes(n, word, fill = value))+
+  geom_col()+
+  scale_fill_gradient2(position="bottom" ,
+                       low = "#BF3100",
+                       mid = "#E6E6EA",
+                       high = "#009FB7")+
+  facet_wrap(~sentiment, scales = "free_y")+
+  scale_x_continuous(name = "Count", breaks = pretty_breaks(n = 10))+
+  theme_bw()+
+  theme(plot.title = element_text(hjust = .5, face = "bold"))+
+  labs(title = "Top 20 Most Common Sentiment Words \nUsed in Barbie (2023)'s IMDB Reviews")
+```
+
+##### Bi-Gram Sentiment
+For bi-gram I used the Valence Aware Dictionary for Sentiment Reasoning (VADER) library since it's the only one that support more than one word. Similar preparation to word.
+```{r}
+vader_allbigrams <- fst::read_fst("vader_allbigrams.fst")
+vaderbigrams <- rename(vader_allbigrams, bigram = text)
+
+sentiment_vader <- inner_join(bigram_counts, vaderbigrams, by = c("word12" = "bigram"))
+sentiment_noNeutral <- sentiment_vader %>% filter(neu != 1) #Filter pure neutral bigrams
+
+sentiment_noNeutral$sentiment <- ifelse(sentiment_noNeutral$compound > 0, "positive", "negative") #Code sentiment
+```
+
+Similarly, the positive reception dominate the negative ones. Looking a bit deeper, all of the top negative words are actually neutral since they are from the plot summary of the movie as opposed on the reviewer thoughts on the movie itself.
+```{r}
+sentiment_noNeutral %>% group_by(sentiment) %>% slice_max(n, n = 50) %>% ungroup() %>% 
+        ggplot(aes(label = word12, size = n, color = sentiment))+
+        geom_text_wordcloud(shape = "diamond")+
+        scale_color_manual(values = c("#FF470A", "#289013"))+
+        scale_size_area(max_size = 8)+
+        theme_void()+
+        theme(plot.title = element_text(hjust = .5, face = "bold"))+
+  labs(title = "Top 50 Most Common Sentiment Words \nUsed in Barbie (2023)'s IMDB Reviews")
+
+sentiment_noNeutral %>% group_by(sentiment) %>% slice_max(n, n = 20) %>% ungroup() %>% mutate(word = reorder(word12,n)) %>%
+  ggplot(., aes(n, word, fill = compound))+
+  geom_col()+
+  scale_fill_gradient2(position="bottom" ,
+                       low = "#BF3100",
+                       mid = "#E6E6EA",
+                       high = "#289013")+
+  facet_wrap(~sentiment, scales = "free_y")+
+  scale_x_continuous(name = "Count", breaks = pretty_breaks(n = 10))+
+  theme_bw()+
+  theme(plot.title = element_text(hjust = .5, face = "bold"))+
+  labs(title = "Top 20 Most Common Sentiment Words \nUsed in Barbie (2023)'s IMDB Reviews")
+```
+
+Comparing these findings to the reviewer’s ratings (not to be confused with user ratings), it was surprising to see that the majority gave the movie 1* despite the very positive reception. Therefore, I read through all 600 reviews and manually assign sentiment to each review, resulting in these two charts. To reduce potential biases, I rate these reviews without looking at the actual rating. It’s not perfect as seen with the 7 and 8 ratings but it was enough to see that 95% of the 1* reviews are positive which is consistent with the text analysis so far. 
+To hit this point home, the time series chart shows overwhelming positive reviews over the course of the premiere week. Interestingly, trends show that most positive reviews were submitted on the weekend as seen by the increasing number of negative reviews in the workweek. Further study could look into the demographic information of these reviewers
+
+```{r}
+review_sentiment <- fst::read_fst("reviewSentiment.fst") #Load data since I add sentiment manually
+
+#Redo all cleaning since I didn't want to messsed up past codes
+forRev <- dat %>% filter(!grepl("Warning: Spoilers", text)) 
+forRev$review <- sub('.*July 2023', '', forRev$text)
+forRev <- forRev %>% subset(select = -c(text, thesis))
+
+review_analysis <- full_join(forRev, review_sentiment, by = c("ID", "review")) #Join back with the other dataset to get date and rating
+review_analysis <- review_analysis %>%  filter(!is.na(sentiment)) #There was one review with no review so I removed it
+
+review_analysis$date[review_analysis$ID == 549] <- "2023-07-21" #Fix a bugged date
+
+review_analysis$date <- as.Date(review_analysis$date) #Convert to date to remove the time (not in the original dataset)
+
+ggplot(review_analysis, aes(as.factor(rating), fill = sentiment))+
+      geom_bar()+
+      theme_bw()+
+      scale_fill_manual(values = c("#BF3100", "#009FB7"))+
+      theme(plot.title = element_text(face = "bold", hjust = .5),
+            legend.position = "bottom",)+
+      scale_x_discrete(name = "IMDB's Rating")+
+      scale_y_continuous(name = "Count")+
+      labs(title = "Reviewer's Rating versus General Sentiment",
+           subtitle = "A large portion of positive review got defaulted to 1* rating")
+```
+
+```{r}
+sentCountDate <- review_analysis %>% group_by(sentiment, date) %>% summarise(n = n()) #Get count of sentiment over the premiere week
+sentSumCount <- review_analysis %>% group_by(date) %>% summarise(n = n()) #Get total review per date
+
+sentComb <- left_join(sentCountDate, sentSumCount, by = "date") #Join two datasets together to calculate percentage
+sentComb$perc <- sentComb$n.x/sentComb$n.y #Calculate percentage
+sentComb$perc_lab <- percent(sentComb$perc) #Create percentage label that I did not use
+
+ ggplot(sentComb ,aes(date, perc, fill = sentiment))+
+      geom_col()+
+      scale_fill_manual(values = c("#BF3100", "#009FB7"))+
+      theme_classic()+
+      scale_x_date(name = "Date", date_breaks = "1 day", date_labels = "%B %d")+
+      theme(axis.text.x = element_text(angle = 45, hjust = 1),
+            legend.position = "none",
+            plot.title = element_text(face = "bold", hjust = .5))+
+      scale_y_continuous(name = "Percentage")+
+      labs(title = "IMDB's Review Sentiments One Week After Premier")
+```
+
+#### *Topic Modeling*
+For topic modeling (clustering for text mining), I used LDA with Gibbs methods, k is set at 4 due to diminishing return at a higher value. The results exceeded my expectations. In order, topic 1 focuses on the women empowering theme of the movie, topic 2 focuses on the great performance of the lead actors as well as the director, topic 3 focuses on the summary of the movie, and topic 4 focuses on the fact that this is a good movie. From the beta value, we see that most reviews emphasize the humorous nature of the movie as well as the talented Greta Gerwig, Margot Robbie, and Ryan Gosling. 
+
+```{r}
+#Converting dataset to dtm format
+dtm_review <- tidyDat %>% 
+  count(ID, word) %>%
+  cast_dtm(ID, word, n) %>%
+  as.matrix()
+
+lda_topics <- LDA(dtm_review, k = 4, method = "Gibbs", control = list(seed = 123)) %>%
+  tidy(matrix = "beta") #Applying LDA
+
+word_probs <- lda_topics %>% group_by(topic) %>% 
+  top_n(15,beta) %>% 
+  ungroup() %>%
+  mutate(term = fct_reorder(term, beta)) #Convert back to data.frame
+```
+
+```{r}
+ggplot(word_probs, aes(term, beta, fill = as.factor(topic)))+
+      geom_col()+
+      facet_wrap(~topic, scales = "free_y")+
+      coord_flip()+
+      theme_classic()+
+      theme(legend.position = "none",
+            plot.title = element_text(face = "bold", hjust = .5))+
+  labs(title = "Topic Modeling")
+```
+
+### **Recommendation**
+As indicated by the presentation, it's evident that this movie holds substantial appeal, leading audiences to overlook a number of its shortcomings, as evident from the significantly positive reception on IMDb. Such large-scale productions are often subject to the influences of numerous stakeholders, which can sometimes hinder their creative coherence. Consequently, the decision by Mattel to allocate resources to the development of its proprietary toy universe may not be the most strategic course of action.
+
+Instead of channeling efforts into expanding a separate toy universe, Mattel would likely benefit more from concentrating on the creation of compelling movies with robust and resonant themes. Allocating resources to crafting narratives that captivate and engage audiences can yield a more profound and sustainable impact.
+
+Furthermore, it's worth highlighting the pivotal role that skilled actors play in enhancing a film's overall quality. As echoed in numerous 5-6 star reviews, adept performances can substantially elevate the cinematic experience. Investing in talent that can effectively embody characters and convey emotions not only enriches the narrative but also leaves a lasting impression on the audience. This resonates with viewers and contributes to the film's resonance and enduring popularity.
+
+In conclusion, the movie's undeniable allure, despite its imperfections, emphasizes the potential for creating impactful films. Rather than dispersing efforts into ventures outside its core competency, Mattel should channel its resources into producing movies that resonate deeply with audiences. By emphasizing strong storytelling and leveraging the influence of skilled actors, the company can establish a more lasting and influential presence in the film industry. This strategic shift will likely yield greater dividends in both artistic acclaim and commercial success compared to diverting resources to an isolated toy universe venture.
+
+### **3Ws**
+#### *What Went Well?* 
+I was surprised that the Barbie project went as well as it did. As mentioned in the presentation, I spent probably 15-20 hours on other datasets before settling on this one and so I was at a heavy time disadvantage when starting this project. I would like to dedicate my deepest thanks to all the people that develop text analysis libraries used in this project. 
+
+The dashboard also went surprisingly well. The process is a lot smoother after having a solid understanding of the structure of Shiny. Additionally, I learned how to cache my plots which helped load time tremendously. We web design now!
+
+Lastly, clustering in text mining is surprisingly easy to interpret compared to data mining. I guess it's due to the nature of the brain to find patterns and project meanings to them. 
+
+#### *What did not Go Well?*
+While the sunk cost from spending time in other projects was immense. I did learn a lot so I'm not too upset about that. Most of my problems was in troubleshooting not working functions. It makes me realize that it is one of the bigger setback of open-source tools such as this one. Compatibility can breaks easily. 
+
+The most challenging aspect of this project, in my perspective, was dealing with regex. R employs distinct syntax for regular expressions, rendering commonly used tools ineffective. Coupled with sparse documentation, the learning process proved to be a source of frustration.
+
+#### *What Would I Do Differently?*
+Given more time, I would spend time learning to scrape review data from movies such as Oppenheimer and Greta Gerwig's past work. Additionally, I would also like to compare review from IMDb to Rotten Tomatoes even the script of the movie itself. 
+
+Once I get better at regex, I will be able to do more with text parsing as well. 
